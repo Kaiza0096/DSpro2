@@ -1,0 +1,120 @@
+import requests
+from bs4 import BeautifulSoup
+import time
+from urllib.parse import urljoin
+import sqlite3
+import re
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+}
+
+DATABASE_NAME = '課題.db'
+
+def setup_database():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS github_repos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_name TEXT UNIQUE NOT NULL,
+            main_language TEXT,
+            star_count INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def insert_repo_data(repo_data):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO github_repos (repo_name, main_language, star_count)
+            VALUES (?, ?, ?)
+            ON CONFLICT(repo_name) DO UPDATE SET
+                main_language = excluded.main_language,
+                star_count = excluded.star_count
+        ''', (repo_data['repo_name'], repo_data['main_language'], repo_data['star_count']))
+        conn.commit()
+    except sqlite3.Error as e:
+        pass 
+    finally:
+        conn.close()
+
+def display_repos_from_db():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT repo_name, main_language, star_count FROM github_repos ORDER BY star_count DESC')
+    repos = cursor.fetchall()
+    
+    print("\n----- Saved Repos -----")
+    if not repos:
+        print("No data.")
+        return
+
+    for repo in repos:
+        print(f"{repo[0]} | {repo[1] or 'N/A'} | ⭐ {repo[2]}")
+    
+    print(f"\nTotal: {len(repos)} repos.")
+    conn.close()
+
+def parse_star_count(stars_text):
+    if not stars_text:
+        return 0
+    stars_text = stars_text.lower().replace(',', '').strip()
+    if stars_text.endswith('k'):
+        return int(float(stars_text[:-1]) * 1000)
+    if stars_text.endswith('m'):
+        return int(float(stars_text[:-1]) * 1000000)
+    try:
+        return int(stars_text)
+    except ValueError:
+        return 0
+
+def scrape_google_github_repos():
+    base_url = "https://github.com/google?tab=repositories"
+    current_page_url = base_url
+    scraped_repos_count = 0
+
+    while current_page_url:
+        try:
+            time.sleep(1)
+            response = requests.get(current_page_url, headers=HEADERS)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            repo_items = soup.find_all('li', class_='Box-row')
+            
+            if not repo_items:
+       
+                break
+
+            for item in repo_items:
+                name_tag = item.find('a', itemprop='name codeRepository')
+                if not name_tag:
+                    continue
+                
+                repo_name = name_tag.text.strip()
+                lang_tag = item.find('span', itemprop='programmingLanguage')
+                main_language = lang_tag.text.strip() if lang_tag else None
+
+                star_tag = item.find('a', href=re.compile(r'/stargazers$'))
+                star_count = parse_star_count(star_tag.text.strip()) if star_tag else 0
+
+                repo_data = {
+                    'repo_name': repo_name,
+                    'main_language': main_language,
+                    'star_count': star_count
+                }
+                insert_repo_data(repo_data)
+                scraped_repos_count += 1
+            
+            next_btn = soup.find('a', class_='next_page')
+            current_page_url = urljoin(base_url, next_btn['href']) if next_btn else None
+        except Exception as e:
+            break 
+        
+if __name__ == "__main__":
+    setup_database()
+    scrape_google_github_repos()
+    display_repos_from_db()
